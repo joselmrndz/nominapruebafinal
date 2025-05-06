@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Nómina - Planta Automotriz</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .container { max-width: 900px; margin: auto; }
+        .upload-section, .controls { margin-bottom: 20px; }
+        button { margin-right: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background-color: #f4f4f4; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Sistema de Nómina - Planta Automotriz</h1>
+        <div class="upload-section">
+            <label>Archivo de Empleados (.xlsx): <input type="file" id="empleadosFile" accept=".xlsx"></label><br>
+            <label>Archivo de Horarios (.xlsx): <input type="file" id="horariosFile" accept=".xlsx"></label>
+        </div>
+        <div class="controls">
+            <button id="processBtn" disabled>Procesar Nómina</button>
+            <button id="exportBtn" disabled>Exportar a Excel</button>
+        </div>
+        <div id="output"></div>
+    </div>
+    <script>
+        let empleadosData = [];
+        let horariosData = [];
+        let resultados = [];
+
+        document.getElementById('empleadosFile').addEventListener('change', e => loadExcel(e, 'empleados'));
+        document.getElementById('horariosFile').addEventListener('change', e => loadExcel(e, 'horarios'));
+
+        function loadExcel(event, type) {
+            const file = event.target.files[0];
+            const reader = new FileReader();
+            reader.onload = e => {
+                const data = new Uint8Array(e.target.result);
+                const wb = XLSX.read(data, { type: 'array' });
+                const sheet = wb.Sheets[wb.SheetNames[0]];
+                const json = XLSX.utils.sheet_to_json(sheet);
+                if (type === 'empleados') empleadosData = json;
+                else horariosData = json;
+                if (empleadosData.length && horariosData.length) document.getElementById('processBtn').disabled = false;
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        document.getElementById('processBtn').addEventListener('click', () => {
+            resultados = empleadosData.map(emp => {
+                const id = emp.ID;
+                const area = emp.Area;
+                const sueldoBase = parseFloat(emp.SueldoBase);
+                const tarifaHora = sueldoBase / 6 / 10;
+                const registros = horariosData.filter(h => h.ID === id);
+
+                let horasExtras = 0, retardosMin = 0, faltas = 0, domingos = 0;
+                const bloques = (area === 'Hojalatería' || area === 'Pintura') ? 30 : 60;
+
+                ['L', 'M', 'Mi', 'J', 'V', 'S', 'D'].forEach(dia => {
+                    const reg = registros.find(r => r.Dia === dia);
+                    if (!reg && dia !== 'D') { faltas++; return; }
+                    if (!reg) return;
+
+                    const [hEntrada, mEntrada] = reg['Hora Entrada'].split(':').map(Number);
+                    const [hSalida, mSalida] = reg['Hora Salida'].split(':').map(Number);
+                    const entradaMin = hEntrada * 60 + mEntrada;
+                    const salidaMin = hSalida * 60 + mSalida;
+                    const minNormal = 8 * 60;
+                    const maxNormal = (dia === 'S' || dia === 'D') ? 14 * 60 : 18 * 60;
+
+                    if (entradaMin > minNormal + 10) retardosMin += entradaMin - (minNormal + 10);
+                    if (salidaMin > maxNormal) {
+                        horasExtras += (bloques === 30) ? Math.floor((salidaMin - maxNormal) / 30) * 0.5 : Math.floor((salidaMin - maxNormal) / 60);
+                    }
+                    if (dia === 'D' && (salidaMin - entradaMin) >= 360) domingos++;
+                });
+
+                return {
+                    ID: emp.ID,
+                    Nombre: emp.Nombre,
+                    Área: emp.Area,
+                    SueldoBase: sueldoBase,
+                    HorasExtras: horasExtras,
+                    Retardos: retardosMin,
+                    Faltas: faltas,
+                    Domingos: domingos,
+                    Bloques: bloques
+                };
+            });
+
+            const outputDiv = document.getElementById('output');
+            outputDiv.innerHTML = '<h2>Resultados</h2><table><thead><tr>' +
+                '<th>ID</th><th>Nombre</th><th>Área</th><th>Sueldo Base</th><th>Horas Extras</th><th>Retardos</th><th>Faltas</th><th>Domingos</th></tr></thead><tbody>' +
+                resultados.map(r => `<tr><td>${r.ID}</td><td>${r.Nombre}</td><td>${r.Área}</td><td>${r.SueldoBase}</td><td>${r.HorasExtras}</td><td>${r.Retardos}</td><td>${r.Faltas}</td><td>${r.Domingos}</td></tr>`).join('') + '</tbody></table>';
+            document.getElementById('exportBtn').disabled = false;
+        });
+
+        document.getElementById('exportBtn').addEventListener('click', () => {
+            const wsData = [['ID', 'Nombre', 'Área', 'Sueldo Base', 'Horas Extras', 'Retardos', 'Faltas', 'Domingos', 'Pago HE', 'Desc. Retardo', 'Desc. Faltas', 'Pago Domingos', 'Total Bonif.', 'Total Deduc.', 'Pago Total']];
+            resultados.forEach((r, index) => {
+                const row = index + 2;
+                wsData.push([
+                    r.ID,
+                    r.Nombre,
+                    r.Área,
+                    r.SueldoBase,
+                    r.HorasExtras,
+                    r.Retardos,
+                    r.Faltas,
+                    r.Domingos,
+                    { f: `E${row} * (D${row} / 6 / 10) * 1.5` },
+                    { f: `CEILING(F${row} / ${r.Bloques}, 1) * (D${row} / 6 / 10) * 2` },
+                    { f: `G${row} * (D${row} / 6)` },
+                    { f: `H${row} * (D${row} / 6)` },
+                    { f: `I${row} + J${row}` },
+                    { f: `K${row} + L${row}` },
+                    { f: `D${row} + M${row} - N${row}` }
+                ]);
+            });
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Nómina');
+            XLSX.writeFile(wb, 'Nomina_Resultado.xlsx');
+        });
+    </script>
+</body>
+</html>
